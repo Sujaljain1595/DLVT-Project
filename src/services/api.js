@@ -1,4 +1,14 @@
-const BASE = import.meta.env.VITE_API_BASE_URL || '/api'
+const getBaseUrl = () => {
+  // If VITE_BACKEND_URL is explicitly set (e.g. in production), use it.
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  if (backendUrl && backendUrl.startsWith('http')) {
+    // If it ends with /api, use it, otherwise add /api suffix
+    return backendUrl.endsWith('/api') ? backendUrl : `${backendUrl.replace(/\/$/, '')}/api`;
+  }
+  return import.meta.env.VITE_API_BASE_URL || '/api';
+};
+
+const BASE = getBaseUrl();
 
 async function post(path, body) {
   const res = await fetch(`${BASE}${path}`, {
