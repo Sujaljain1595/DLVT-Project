@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: dl-virtual-teacher-backend
+    env: python
+    rootDir: backend
+    buildCommand: "pip install -r requirements-web.txt"
+    startCommand: "gunicorn api:app -c gunicorn_config.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: XAI_BASE_URL
+        value: https://api.x.ai/v1
+      - key: XAI_MODEL
+        value: grok-4.3
+      # Set these secrets in the Render dashboard → Environment tab (never commit real keys!)
+      - key: XAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false

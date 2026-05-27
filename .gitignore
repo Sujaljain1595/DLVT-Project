@@ -1,3 +1,11 @@
+node_modules
 .env
-node_modules/
-dist/
+backend/.env
+dist
+build
+__pycache__
+*.pyc
+*.pyo
+backend/__pycache__
+backend/outputs/
+backend/memory/
