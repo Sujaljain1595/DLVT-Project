@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { MessageSquare, Send, Loader2, RotateCcw, User, Bot, Sparkles } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import { api } from '../services/api'
+import { api, apiBaseUrl } from '../services/api'
 import { useApp } from '../context/AppContext'
 
 const SUGGESTIONS = [
@@ -56,7 +56,7 @@ export default function AIChatMentor() {
     } catch {
       const fallback = {
         role: 'ai',
-        content: `I apologize — the AI backend seems to be offline right now. 🔌\n\nTo get AI responses:\n1. Make sure the FastAPI backend is running: \`python api.py\`\n2. Verify it's accessible at ${import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'}\n3. Check your xAI/Grok API key is configured\n\nYour question was: **"${msg}"**`,
+        content: `I apologize — the AI backend seems to be offline right now. 🔌\n\nTo get AI responses:\n1. Make sure the FastAPI backend is running\n2. Verify it's accessible at ${apiBaseUrl}\n3. Check your AI API key is configured on the backend\n\nYour question was: **"${msg}"**`,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
       setMessages(prev => [...prev, fallback])

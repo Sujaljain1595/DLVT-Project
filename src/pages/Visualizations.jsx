@@ -5,6 +5,7 @@ import { NeuralNetViz, BackpropViz, GradientViz, ActivationViz } from "./vizComp
 import { AttentionViz, RNNViz, DropoutViz, BatchNormViz } from "./vizComponents2.jsx"
 import { CNNViz, LossCurveViz, EmbeddingViz, AutoencoderViz, GANViz, SoftmaxViz, LRScheduleViz } from "./vizComponents3.jsx"
 import UniversalGraphViz from "./UniversalGraphViz.jsx"
+import { apiBaseUrl } from "../services/api"
 
 const ICON_MAP = {
   "neural-network": Activity,
@@ -64,7 +65,7 @@ function AICustomViz({ topic, onRedirect }) {
     setError(null)
     setGraphData(null)
     
-    fetch(`${import.meta.env.VITE_API_BASE_URL || "/api"}/analyze_topic`, {
+    fetch(`${apiBaseUrl}/analyze_topic`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topic })

@@ -1,4 +1,8 @@
 const getBaseUrl = () => {
+  // In development, always use the proxy (relative path) to avoid CORS issues
+  if (import.meta.env.DEV) {
+    return import.meta.env.VITE_API_BASE_URL || '/api';
+  }
   // If VITE_BACKEND_URL is explicitly set (e.g. in production), use it.
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   if (backendUrl && backendUrl.startsWith('http')) {
@@ -8,7 +12,8 @@ const getBaseUrl = () => {
   return import.meta.env.VITE_API_BASE_URL || '/api';
 };
 
-const BASE = getBaseUrl();
+export const apiBaseUrl = getBaseUrl();
+const BASE = apiBaseUrl;
 
 async function post(path, body) {
   const res = await fetch(`${BASE}${path}`, {

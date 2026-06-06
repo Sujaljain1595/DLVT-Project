@@ -269,7 +269,7 @@ export default function LearnTopic() {
       {error && (
         <div className="card" style={{ border: '1px solid rgba(239,68,68,0.2)', borderRadius: 14, padding: '18px 24px', background: 'rgba(239,68,68,0.05)', color: '#fca5a5' }}>
           <strong style={{ fontSize: '0.95rem' }}>Connection Timeout</strong>
-          <p style={{ fontSize: '0.85rem', marginTop: 6, opacity: 0.9, lineHeight: 1.5 }}>The AI sandbox environment appears to be offline. Make sure the teaching backend server is running locally.</p>
+          <p style={{ fontSize: '0.85rem', marginTop: 6, opacity: 0.9, lineHeight: 1.5 }}>The AI sandbox environment appears to be offline. Make sure the teaching backend server is running and reachable.</p>
         </div>
       )}
 

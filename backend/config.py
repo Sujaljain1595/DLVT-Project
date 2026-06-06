@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional
 
+# Load the backend's own .env first, then fallback/complement with workspace CWD .env
+backend_env = Path(__file__).parent / ".env"
+if backend_env.exists():
+    load_dotenv(dotenv_path=backend_env)
 load_dotenv()
 
 # Base paths
@@ -33,11 +37,21 @@ class LLMConfig(BaseModel):
 
     def get_llm(self):
         from crewai import LLM
+        model_name = self.model
+        key = self.api_key
+
+        has_gemini = key and not key.strip().lower().startswith("your_")
+        has_groq = self.groq_api_key and not self.groq_api_key.strip().lower().startswith("your_")
+
+        if not has_gemini and has_groq:
+            model_name = "groq/llama-3.3-70b-versatile"
+            key = self.groq_api_key
+
         return LLM(
-            model=self.model,
+            model=model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            api_key=self.api_key,
+            api_key=key,
             max_retries=10, # Crucial: aggressively retry on 503 UNAVAILABLE errors
             timeout=120
         )

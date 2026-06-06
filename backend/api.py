@@ -4,6 +4,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from dotenv import load_dotenv, dotenv_values
+backend_env = Path(__file__).parent / ".env"
+if backend_env.exists():
+    load_dotenv(dotenv_path=backend_env)
 load_dotenv()
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
@@ -140,8 +143,9 @@ def get_groq_client():
     global _groq_client
     # Re-read from env every call so newly-written .env keys are picked up
     groq_key = os.getenv("GROQ_API_KEY")
-    if _groq_client is None and valid_api_key(groq_key) and Groq:
-        _groq_client = Groq(api_key=groq_key)
+    if valid_api_key(groq_key) and Groq:
+        if _groq_client is None or _groq_client.api_key != groq_key:
+            _groq_client = Groq(api_key=groq_key)
     return _groq_client
 
 def fast_generate(prompt: str) -> str:
@@ -181,23 +185,25 @@ def fast_generate(prompt: str) -> str:
             return response.choices[0].message.content
         except Exception as xai_err:
             err_str = str(xai_err)
-            # Permanently disable xAI if the account has no credits
-            if "credits" in err_str.lower() or "403" in err_str or "permission" in err_str.lower():
-                print(f"xAI account has no credits — disabling xAI for this session. Error: {xai_err}")
+            # Permanently disable xAI if the account has no credits or key is invalid
+            if any(w in err_str.lower() for w in ["credits", "403", "permission", "401", "unauthorized", "invalid"]):
+                print(f"xAI account/key is invalid or has no credits â€” disabling xAI for this session. Error: {xai_err}")
                 _xai_disabled = True
                 _xai_client = None
             else:
                 print(f"xAI/Grok failed: {xai_err}. Trying Groq...")
 
-    # 3. Try Groq as final fallback
+    # 3. Try Groq as final fallback (free tier: max ~6000 output tokens for 70B, ~3000 for 8B)
     groq_client = get_groq_client()
     if groq_client:
+        # Truncate very long prompts to avoid input token limits on free tier (~8k input limit)
+        groq_prompt = prompt[:8000] if len(prompt) > 8000 else prompt
         try:
             print("Using Groq (70B) for generation...")
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=16000
+                messages=[{"role": "user", "content": groq_prompt}],
+                max_tokens=6000
             )
             return response.choices[0].message.content
         except Exception as groq_err:
@@ -205,12 +211,13 @@ def fast_generate(prompt: str) -> str:
             try:
                 response = groq_client.chat.completions.create(
                     model="llama-3.1-8b-instant",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=16000
+                    messages=[{"role": "user", "content": groq_prompt}],
+                    max_tokens=3000
                 )
                 return response.choices[0].message.content
             except Exception as groq_err2:
                 print(f"Groq 8B also failed: {groq_err2}.")
+
 
     raise HTTPException(
         status_code=500,
@@ -242,19 +249,225 @@ def offline_notes(topic: str, note_type: str = "detailed") -> str:
     return mock["content"]
 
 def offline_chat_reply(message: str) -> str:
-    return f"""I can help, but the live Grok API key is not configured yet.
+    msg = message.lower().strip()
 
-For your question:
+    # Prefix for offline mode explanation
+    prefix = "> âš ï¸ **AI Backend Unavailable:** The AI service could not be reached right now (API may be busy or the key may have expired). Here is a premium offline study guide for your query:\n\n"
 
-> {message}
+    # Suffix with instructions
+    suffix = "\n\n---\n*To enable dynamic AI responses, please restart the FastAPI backend (`python api.py` in the `backend/` folder) and ensure your `XAI_API_KEY` in `backend/.env` is valid. You can also add a free `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/).*"
 
-Here is a useful offline starting point:
+    # 1. CNN vs RNN / Difference
+    if any(w in msg for w in ["difference", "vs", "versus", "compare"]) and any(w in msg for w in ["cnn", "convolution"]) and any(w in msg for w in ["rnn", "recurrent"]):
+        content = """### ðŸ”„ **CNN vs. RNN: Architecture Comparison**
 
-- Identify the concept's **input**, **learned representation**, **loss/objective**, and **output**.
-- Trace the data flow layer by layer or step by step.
-- For debugging, first check shapes, labels, loss values, and whether the model can overfit a tiny batch.
+| Feature | Convolutional Neural Network (CNN) | Recurrent Neural Network (RNN) |
+| :--- | :--- | :--- |
+| **Primary Input** | Spatial data (Images, grid layouts, 2D signals) | Sequential data (Text, Time-series, Audio waves) |
+| **Data Flow** | Feedforward (No loops). Uses spatial convolution filters. | Recurrent (Feedback loops). Feeds output back as input. |
+| **State Retention** | No memory of past inputs (stateless per sample). | Retains hidden state (temporal memory) from past steps. |
+| **Parameter Sharing** | Shares weight kernels across spatial coordinates. | Shares same transition weights across all time steps. |
+| **Main Drawback** | Poor at tracking long-term sequential state. | Highly susceptible to vanishing or exploding gradients. |
 
-Add your real `XAI_API_KEY` to the `.env` file and restart FastAPI to enable live Grok answers."""
+#### **Code Comparison**
+* **CNN** uses spatial convolutions: `nn.Conv2d(in_channels, out_channels, kernel_size)`
+* **RNN** uses temporal recursion: `nn.LSTM(input_size, hidden_size, batch_first=True)`"""
+        return prefix + content + suffix
+
+    # 2. CNN
+    if any(w in msg for w in ["cnn", "convolution", "image", "vision"]):
+        content = """### ðŸ§  **Convolutional Neural Networks (CNNs)**
+
+A **Convolutional Neural Network (CNN)** is a deep learning architecture optimized for processing grid-structured data like images.
+
+#### **Core Operations**
+1. **Convolution (Feature Detection)**: Slides a small matrix (kernel/filter) over the input image to calculate dot products, capturing local spatial features like edges, corners, and textures.
+2. **Activation (Non-Linearity)**: Applies functions like **ReLU** to introduce non-linear mapping capabilities.
+3. **Pooling (Downsampling)**: Reduces the spatial size (width and height) of feature maps (usually via Max Pooling) to achieve translation invariance and decrease parameter size.
+
+#### **PyTorch CNN Example**
+```python
+import torch
+import torch.nn as nn
+
+class PyTorchCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)  # Halves spatial dimensions
+        )
+        self.classifier = nn.Linear(16 * 16 * 16, num_classes)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, start_dim=1)
+        return self.classifier(x)
+```"""
+        return prefix + content + suffix
+
+    # 3. RNN
+    if any(w in msg for w in ["rnn", "recurrent", "lstm", "gru", "sequence", "time"]):
+        content = """### ðŸ”„ **Recurrent Neural Networks (RNNs)**
+
+**RNNs** are designed to model sequential data by maintaining a "hidden state" (memory) that carries information from previous steps in the sequence.
+
+#### **Core Equations**
+At time step $t$, the hidden state $h_t$ is updated using the current input $x_t$ and the previous hidden state $h_{t-1}$:
+$$h_t = \\tanh(W_{hh} h_{t-1} + W_{xh} x_t + b_h)$$
+
+#### **Key Limitations & Solutions**
+* **Vanishing Gradients**: Standard RNNs struggle with long sequences because backpropagating through time involves repeated matrix multiplication.
+* **Modern Variants**: **LSTM** (Long Short-Term Memory) and **GRU** (Gated Recurrent Unit) use gating mechanisms to decide what information to store, write, and read, preventing gradient decay.
+
+#### **PyTorch LSTM Example**
+```python
+import torch.nn as nn
+
+# Define an LSTM layer
+lstm_layer = nn.LSTM(input_size=10, hidden_size=20, num_layers=2, batch_first=True)
+```"""
+        return prefix + content + suffix
+
+    # 4. Attention / Transformer
+    if any(w in msg for w in ["attention", "transformer", "self-attention", "bert", "gpt", "llm"]):
+        content = """### âš¡ **Attention Mechanism & Transformers**
+
+The **Transformer** (introduced in the seminal paper *"Attention Is All You Need"*) relies on **Self-Attention** to process sequences in parallel, bypassing recurrent networks.
+
+#### **Queries, Keys, and Values (Q, K, V)**
+Self-attention maps a query to a distribution over keys to extract weighted value representations:
+$$\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$
+* **Query ($Q$)**: The representation of the current token looking for context.
+* **Key ($K$)**: The indexing representations of all tokens in the sequence.
+* **Value ($V$)**: The actual content vectors to be mixed.
+
+#### **Why it is Revolutionary**
+1. **No Recurrence**: Enables massive parallelization during training.
+2. **Constant Path Length**: Tokens can connect directly across any distance, solving vanishing gradients in long contexts.
+
+#### **PyTorch Self-Attention Example**
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SingleHeadAttention(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, d_model)
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (x.size(-1) ** 0.5)
+        weights = F.softmax(scores, dim=-1)
+        return torch.matmul(weights, V)
+```"""
+        return prefix + content + suffix
+
+    # 5. Vanishing Gradient
+    if any(w in msg for w in ["vanishing", "exploding", "gradient", "problem"]):
+        content = """### ðŸ“‰ **The Vanishing/Exploding Gradient Problem**
+
+This issue occurs during the backpropagation phase in deep or recurrent networks when gradients shrink (or grow) exponentially as they travel backward.
+
+#### **Why it Happens**
+* **Chain Rule Multiplication**: When backpropagating through many layers, gradients are multiplied together.
+* **Saturating Activations**: Activation functions like **Sigmoid** or **Tanh** have very small derivative outputs near their boundaries (max $0.25$ for Sigmoid). Multiplying these repeatedly quickly reduces the gradient to zero.
+
+#### **How to Fix It**
+1. **Use ReLU**: The Rectified Linear Unit ($\\text{ReLU}(x) = \\max(0, x)$) has a constant gradient of $1.0$ for all positive inputs.
+2. **Residual Connections**: Skip connections (e.g., in ResNets) allow the gradient to bypass layers without attenuation: $x_{l+1} = x_l + F(x_l)$.
+3. **Batch Normalization**: Regulates activations to avoid saturating regions.
+4. **Weight Initialization**: Use Xavier (Glorot) or He (Kaiming) initialization to maintain stable variance across layers."""
+        return prefix + content + suffix
+
+    # 6. Dropout
+    if any(w in msg for w in ["dropout", "overfit", "regularization"]):
+        content = """### ðŸ›¡ï¸ **Dropout: Regularization Technique**
+
+**Dropout** is an elegant regularization technique designed to prevent deep neural networks from overfitting.
+
+#### **Mechanism**
+* During each training iteration, individual nodes are randomly "dropped out" (set to zero) with a probability $p$ (usually $0.2$ to $0.5$).
+* During evaluation (inference), all nodes are active, but their outputs are scaled down by $(1 - p)$ to match the expected activation level.
+
+#### **Why it Works**
+1. **Avoids Co-adaptation**: Neurons cannot rely on the specific activations of adjacent neurons. Every node must learn features that are robust on their own.
+2. **Simulates Ensembles**: Training with dropout is mathematically equivalent to training an exponential ensemble of smaller networks sharing parameters.
+
+#### **PyTorch Usage**
+```python
+import torch.nn as nn
+
+model = nn.Sequential(
+    nn.Linear(512, 256),
+    nn.ReLU(),
+    nn.Dropout(p=0.3),  # Deactivates 30% of activations randomly
+    nn.Linear(256, 10)
+)
+```"""
+        return prefix + content + suffix
+
+    # 7. Batch Normalization
+    if any(w in msg for w in ["batch normalization", "batchnorm", "normalize"]):
+        content = """### ðŸ“Š **Batch Normalization (BatchNorm)**
+
+**Batch Normalization** is a technique that normalizes the inputs of each layer across the mini-batch during training.
+
+#### **Core Benefits**
+1. **Accelerates Training**: Allows the use of significantly higher learning rates.
+2. **Reduces Internal Covariate Shift**: Keeps the distribution of layer activations stable throughout training.
+3. **Acts as Regularizer**: Adds light noise to activations (since mean/variance are estimated per mini-batch), reducing the need for heavy dropout.
+
+#### **The Algorithm**
+For input features $x$ over batch $B$:
+$$\\hat{x} = \\frac{x - \\mu_B}{\\sqrt{\\sigma_B^2 + \\epsilon}}$$
+$$y = \\gamma \\hat{x} + \\beta$$
+*(where $\\gamma$ and $\\beta$ are learnable scale/shift parameters)*"""
+        return prefix + content + suffix
+
+    # 8. Backpropagation
+    if any(w in msg for w in ["backpropagation", "backprop", "chain rule", "gradient descent"]):
+        content = """### ðŸ§® **Backpropagation Algorithm**
+
+**Backpropagation** is the foundational algorithm used to calculate gradients of a loss function with respect to the network's parameters.
+
+#### **Step-by-Step Flow**
+1. **Forward Pass**: Compute activations layer by layer to get the final output $\\hat{y}$ and current loss $L$.
+2. **Calculate Output Error**: Find the partial derivative of the loss at the output layer: $\\delta^{[L]} = \\frac{\\partial L}{\\partial z^{[L]}}$.
+3. **Backward Pass (Chain Rule)**: Propagate the error backwards to calculate gradients for every layer:
+   $$\\frac{\\partial L}{\\partial W^{[l]}} = \\delta^{[l]} (a^{[l-1]})^T$$
+   $$\\delta^{[l-1]} = (W^{[l]})^T \\delta^{[l]} \\odot \\sigma'(z^{[l-1]})$$
+4. **Parameter Update**: Apply an optimizer step (e.g., Stochastic Gradient Descent):
+   $$W^{[l]} \\leftarrow W^{[l]} - \\eta \\frac{\\partial L}{\\partial W^{[l]}}$$"""
+        return prefix + content + suffix
+
+    # Default fallback response (general study guide helper)
+    content = f"""### ðŸ“– **Deep Learning Offline Study Guide**
+
+Your question: *"{message}"*
+
+#### **Core Analysis Framework**
+To understand or explain any deep learning concept, structure your explanation around these four components:
+1. **Input Space**: What shape and type of data enters this component (e.g., `(B, C, H, W)` tensors, sequence embeddings)?
+2. **Representation Layer**: What mathematical operations transform the inputs (e.g., convolutions, recurrence, attention projections)?
+3. **Optimization Objective**: What loss function guides the weights (e.g., Cross-Entropy, Mean Squared Error, Contrastive Loss)?
+4. **Output/Inference**: What form does the final prediction take?
+
+#### **Common Troubleshooting Steps**
+* **Tensor Shape Errors**: Always inspect shapes between layer boundaries. A quick `print(x.shape)` inside the forward method is highly effective.
+* **Loss Exploding/NaNs**: Check for high learning rates, lack of input normalization, or division by zero/log(0) inside custom loss functions.
+* **Model Not Learning**: Try training on a tiny subset of 5-10 samples first. If the model cannot overfit this small set to zero loss, there is a bug in the model's architecture or data pipeline."""
+
+    return prefix + content + suffix
 
 def classify_topic(topic: str) -> str:
     topic_lower = topic.lower()
@@ -1407,8 +1620,8 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
     if level == "beginner":
         # Build rich analogies and step-by-step story based on topic kind
         analogies = {
-            "cnn": f"Imagine your brain scanning a photo of a dog. You do not process every pixel at once — your eyes naturally detect shapes: ears, snout, fur texture. {display} works the same way: small filters slide across an image and each filter learns to recognise a specific visual pattern, like a horizontal edge or a colour gradient.",
-            "transformer": f"Think of how you read a sentence. When you see the word 'bank', you look at nearby words — 'river' or 'money' — to figure out the meaning. {display} does this mathematically by letting every word 'attend' to every other word at the same time, rather than reading left-to-right one word at a time.",
+            "cnn": f"Imagine your brain scanning a photo of a dog. You do not process every pixel at once â€” your eyes naturally detect shapes: ears, snout, fur texture. {display} works the same way: small filters slide across an image and each filter learns to recognise a specific visual pattern, like a horizontal edge or a colour gradient.",
+            "transformer": f"Think of how you read a sentence. When you see the word 'bank', you look at nearby words â€” 'river' or 'money' â€” to figure out the meaning. {display} does this mathematically by letting every word 'attend' to every other word at the same time, rather than reading left-to-right one word at a time.",
             "gan": f"Imagine a forger trying to fake a painting and a detective trying to catch the fake. The forger gets better at fooling the detective, and the detective gets better at spotting fakes. This is exactly how {display} trains: the Generator (forger) and the Discriminator (detective) improve together through competition.",
             "rnn": f"Think of reading a story one sentence at a time and keeping notes in your head. Each new sentence updates your notes, which carry the meaning of everything you have read so far. {display} does the same with sequences: each input updates a hidden state that remembers the past.",
             "autoencoder": f"Imagine compressing a large photo into a tiny thumbnail, then expanding it back to full size. {display} learns to compress data into a small bottleneck and then reconstruct it. The compression forces the model to keep only the most important information.",
@@ -1425,32 +1638,32 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
 
             ("The Real-World Analogy",
              analogy + "\n\n"
-             f"This analogy is not perfect — no analogy is — but it captures the key idea: **{display} is a trainable system that adjusts its internal behaviour based on feedback from its mistakes.** The more examples it sees, the better it gets.\n\n"
+             f"This analogy is not perfect â€” no analogy is â€” but it captures the key idea: **{display} is a trainable system that adjusts its internal behaviour based on feedback from its mistakes.** The more examples it sees, the better it gets.\n\n"
              f"The amazing thing is that you never have to write the rules yourself. The model figures them out by seeing thousands or millions of examples and being told after each one whether it was right or wrong."),
 
             ("The Three Things To Know First",
              f"Before diving into architecture details, lock in these three ideas for **{topic}**:\n\n"
-             f"1. **Input → {profile['input']}**: This is what the model receives. Understanding the shape and format of the input is the single most important first step.\n\n"
-             f"2. **Output → {profile['output']}**: This is what the model produces. Knowing what a good output looks like tells you how to measure success.\n\n"
+             f"1. **Input â†’ {profile['input']}**: This is what the model receives. Understanding the shape and format of the input is the single most important first step.\n\n"
+             f"2. **Output â†’ {profile['output']}**: This is what the model produces. Knowing what a good output looks like tells you how to measure success.\n\n"
              f"3. **Loss function**: This is the score that tells the model how wrong it was. A lower loss means a better prediction. The model spends all of its training time trying to minimise this score.\n\n"
              f"Once you can describe these three things in plain language for **{topic}**, you are already ahead of most beginners."),
 
             ("The Main Components (Plain English)",
              f"Every part of **{display}** has one job. Here is each component in the simplest possible terms:\n\n" +
              "\n\n".join([f"- **{part}**: This component receives data from the previous step, applies a transformation to make the data more useful, and passes the result to the next step." for part in core]) +
-             f"\n\nTogether, these parts form a pipeline: **{'  →  '.join(profile['flow'])}**. Read this from left to right like a story. Data enters on the left, gets refined at each step, and exits as a useful prediction on the right."),
+             f"\n\nTogether, these parts form a pipeline: **{'  â†’  '.join(profile['flow'])}**. Read this from left to right like a story. Data enters on the left, gets refined at each step, and exits as a useful prediction on the right."),
 
             ("Step-by-Step: How Training Works",
              f"Here is the beginner training story for **{topic}**, told as a simple loop:\n\n"
-             f"**Step 1 — Forward Pass:** Feed one batch of input ({profile['input']}) through the model. Each layer transforms the data according to its current parameters.\n\n"
-             f"**Step 2 — Compute Loss:** Compare the model's output ({profile['output']}) with the correct answer. Calculate how wrong the model was. This error number is called the loss.\n\n"
-             f"**Step 3 — Backward Pass (Backpropagation):** The loss is sent back through the network. Using calculus (the chain rule), the model figures out which parameters caused the most error.\n\n"
-             f"**Step 4 — Update Parameters:** An optimizer (like Adam or SGD) nudges each parameter slightly in the direction that reduces the loss. The nudge size is controlled by the learning rate.\n\n"
-             f"**Step 5 — Repeat:** This loop runs thousands of times. Each repetition (called an epoch) makes the model slightly better. Eventually, the model learns patterns that generalise to new data it has never seen."),
+             f"**Step 1 â€” Forward Pass:** Feed one batch of input ({profile['input']}) through the model. Each layer transforms the data according to its current parameters.\n\n"
+             f"**Step 2 â€” Compute Loss:** Compare the model's output ({profile['output']}) with the correct answer. Calculate how wrong the model was. This error number is called the loss.\n\n"
+             f"**Step 3 â€” Backward Pass (Backpropagation):** The loss is sent back through the network. Using calculus (the chain rule), the model figures out which parameters caused the most error.\n\n"
+             f"**Step 4 â€” Update Parameters:** An optimizer (like Adam or SGD) nudges each parameter slightly in the direction that reduces the loss. The nudge size is controlled by the learning rate.\n\n"
+             f"**Step 5 â€” Repeat:** This loop runs thousands of times. Each repetition (called an epoch) makes the model slightly better. Eventually, the model learns patterns that generalise to new data it has never seen."),
 
             ("What To Avoid As A Beginner",
              f"New learners make a few very common mistakes with **{topic}**:\n\n"
-             f"- **Jumping to code before understanding the data flow.** Always draw the pipeline first: input → layers → output.\n"
+             f"- **Jumping to code before understanding the data flow.** Always draw the pipeline first: input â†’ layers â†’ output.\n"
              f"- **Only checking training accuracy.** A model can memorise training data without learning anything useful. Always check validation accuracy too.\n"
              f"- **Getting lost in math too early.** The equations matter, but intuition comes first. Understand what each component *does* before you learn *why mathematically*.\n"
              f"- **Ignoring tensor shapes.** Most beginners spend hours debugging code because a tensor has the wrong shape. Get into the habit of printing shapes at every step.\n\n"
@@ -1462,21 +1675,21 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
         sections = [
             ("Architecture Breakdown: Beyond the Definition",
              f"At the intermediate level, you should be able to explain **{display}** not just as a definition, but as a set of deliberate *design decisions*. Each component was chosen because it solves a specific problem.\n\n"
-             f"The input is **{profile['input']}** and the output is **{profile['output']}**. The architecture connects these through the pipeline: **{'  →  '.join(profile['flow'])}**.\n\n"
+             f"The input is **{profile['input']}** and the output is **{profile['output']}**. The architecture connects these through the pipeline: **{'  â†’  '.join(profile['flow'])}**.\n\n"
              f"For each stage, ask: **what shape does the tensor have here? what information has been captured? what information has been discarded?** This mindset separates intermediate practitioners from beginners.\n\n" +
              "\n\n".join([f"**{part}:** This component plays a specific architectural role. Understanding how it changes the tensor shape, what it learns, and what failure looks like when it is misconfigured is a key intermediate skill." for part in core])),
 
             ("The Training Loop In Depth",
              f"An intermediate understanding of **{topic}** means you can trace the full training loop at a technical level, not just describe it abstractly.\n\n"
-             f"**Forward Pass:** Data flows through {' → '.join(profile['flow'])}. At each stage, you should be able to state the tensor shape before and after the operation. For example, after an embedding layer the shape changes from (batch, seq_len) to (batch, seq_len, d_model). Always track shapes explicitly.\n\n"
+             f"**Forward Pass:** Data flows through {' â†’ '.join(profile['flow'])}. At each stage, you should be able to state the tensor shape before and after the operation. For example, after an embedding layer the shape changes from (batch, seq_len) to (batch, seq_len, d_model). Always track shapes explicitly.\n\n"
              f"**Loss Computation:** The loss function is not just a black box. For {display}, the loss must be chosen to match the output type. Classification uses cross-entropy, generation often uses negative log-likelihood or reconstruction loss, and regression uses mean squared error. Using the wrong loss causes silent failures that are hard to debug.\n\n"
              f"**Backpropagation:** Gradients flow backward through the same operations that processed data forward. The chain rule ensures each parameter gets credited or blamed proportionally. Gradient clipping, normalization layers, and residual connections are all engineering choices that affect how cleanly the gradient signal reaches early layers.\n\n"
              f"**Optimizer Step:** Adam is typically best for getting started. It adapts the learning rate per parameter based on gradient history. Understanding the difference between Adam, SGD with momentum, and AdamW (which adds weight decay correctly) is an intermediate-level topic."),
 
             ("Key Hyperparameters and Their Effect",
              f"One of the most important intermediate skills is knowing which hyperparameter to change when something goes wrong.\n\n"
-             f"**Learning Rate:** Too high → loss oscillates or diverges. Too low → training is too slow or gets stuck. Use a learning rate finder or start at 3e-4 (the 'Karpathy constant') and halve it if the loss is unstable.\n\n"
-             f"**Batch Size:** Larger batches give more stable gradient estimates but use more memory and sometimes generalise worse. Smaller batches are noisier but act as a form of regularization. 32–256 is a good starting range.\n\n"
+             f"**Learning Rate:** Too high â†’ loss oscillates or diverges. Too low â†’ training is too slow or gets stuck. Use a learning rate finder or start at 3e-4 (the 'Karpathy constant') and halve it if the loss is unstable.\n\n"
+             f"**Batch Size:** Larger batches give more stable gradient estimates but use more memory and sometimes generalise worse. Smaller batches are noisier but act as a form of regularization. 32â€“256 is a good starting range.\n\n"
              f"**Model Size (Width/Depth):** More parameters = more capacity = potential for better fit. But more parameters also means slower training, more memory, and higher risk of overfitting on small datasets. Always validate the tradeoff.\n\n"
              f"**Regularization (Dropout, Weight Decay):** Only add regularization after you confirm the model can learn at all. If training loss is not going down, regularization is not your problem. If training loss goes down but validation loss goes up, regularization is your friend.\n\n"
              f"**Topic-Specific Risk:** The main failure mode for {display} is **{profile['risk']}**. Knowing this risk means you can set up monitoring to detect it early."),
@@ -1484,7 +1697,7 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
             ("Debugging Workflow",
              f"Most intermediate practitioners waste time debugging the wrong thing. Here is a systematic approach for **{topic}**:\n\n"
              f"**1. Verify tensor shapes at every layer.** Add `print(x.shape)` throughout the forward pass. A shape mismatch will cause cryptic errors later.\n\n"
-             f"**2. Overfit a tiny batch.** Take 2–4 examples and train until loss is near zero. If the model cannot overfit a tiny batch, there is a bug in the model, data, or loss function — not an underfitting problem.\n\n"
+             f"**2. Overfit a tiny batch.** Take 2â€“4 examples and train until loss is near zero. If the model cannot overfit a tiny batch, there is a bug in the model, data, or loss function â€” not an underfitting problem.\n\n"
              f"**3. Separate training and validation curves.** Plot both on the same graph. If training loss decreases but validation loss increases (or stagnates), you have overfitting. If both are high, you have underfitting.\n\n"
              f"**4. Inspect wrong predictions.** Look at specific examples the model gets wrong. Is there a pattern? Wrong class boundary? Confusing class pairs? Data noise? This gives more signal than aggregate metrics.\n\n"
              f"**5. Run a controlled ablation.** Change exactly one thing, compare results, and record why you made the change. This is the difference between a practitioner who understands their model and one who just tries random things."),
@@ -1498,7 +1711,7 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
             ("Implementation Checklist",
              f"Before declaring your {topic} implementation complete, verify:\n\n"
              f"- [ ] Tensor shapes are correct at each layer (log them in debug mode)\n"
-             f"- [ ] The model can overfit a tiny batch (loss → 0 on 4 examples)\n"
+             f"- [ ] The model can overfit a tiny batch (loss â†’ 0 on 4 examples)\n"
              f"- [ ] Training loss and validation loss are both being tracked and plotted\n"
              f"- [ ] The loss function matches the output type (logits, probabilities, or values)\n"
              f"- [ ] Learning rate was tuned (not left at a random default)\n"
@@ -1510,16 +1723,16 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
     else:
         sections = [
             ("Formal Mathematical Formulation",
-             f"Let the model be a parameterised function `f_θ: X → Y` where `X` is the input domain ({profile['input']}) and `Y` is the output domain ({profile['output']}).\n\n"
+             f"Let the model be a parameterised function `f_Î¸: X â†’ Y` where `X` is the input domain ({profile['input']}) and `Y` is the output domain ({profile['output']}).\n\n"
              f"The learning objective is:\n\n"
-             f"```\nθ* = argmin_θ  (1/N) Σᵢ L(f_θ(xᵢ), yᵢ)  +  λ Ω(θ)\n```\n\n"
-             f"where `L` is the task loss, `Ω(θ)` is a regularization term (L2, L1, or spectral norm), and `λ` controls regularization strength.\n\n"
+             f"```\nÎ¸* = argmin_Î¸  (1/N) Î£áµ¢ L(f_Î¸(xáµ¢), yáµ¢)  +  Î» Î©(Î¸)\n```\n\n"
+             f"where `L` is the task loss, `Î©(Î¸)` is a regularization term (L2, L1, or spectral norm), and `Î»` controls regularization strength.\n\n"
              f"**The core mathematical relation for {profile['display']} is:**\n\n"
              f"```\n{profile['math']}\n```\n\n"
              f"Advanced analysis requires: (1) identifying every tensor shape in this expression, (2) stating which variables are learned vs fixed, (3) deriving the gradient of this expression with respect to each trainable parameter, and (4) discussing the assumptions (independence, smoothness, stationarity) that make this formulation valid."),
 
             ("Gradient Flow and Backpropagation Analysis",
-             f"Backpropagation applies the chain rule to compute `∂L/∂θ` for every parameter `θ` in `f_θ`. For **{profile['display']}**, the critical question is: *does the gradient signal reach early parameters with enough strength and direction to be useful?*\n\n"
+             f"Backpropagation applies the chain rule to compute `âˆ‚L/âˆ‚Î¸` for every parameter `Î¸` in `f_Î¸`. For **{profile['display']}**, the critical question is: *does the gradient signal reach early parameters with enough strength and direction to be useful?*\n\n"
              f"**Vanishing gradients** occur when repeated multiplications by values < 1 shrink the gradient signal to near zero in early layers. This was a major problem in deep RNNs and early deep networks. Solutions include: residual connections, gradient clipping, LSTM gating, and layer normalisation.\n\n"
              f"**Exploding gradients** occur when repeated multiplications by values > 1 cause the gradient to grow exponentially. Solutions: gradient clipping (by norm or by value), careful initialisation (Glorot/He), and batch normalisation.\n\n"
              f"**Dead neurons** (specifically with ReLU) occur when a neuron's pre-activation is always negative, so the gradient is always 0 and the neuron never learns. Leaky ReLU, GELU, and SiLU mitigate this.\n\n"
@@ -1527,17 +1740,17 @@ def build_theory(profile: Dict[str, Any], topic: str, level: str) -> str:
 
             ("Computational Complexity and Scaling",
              f"Advanced practitioners must reason about the cost of {profile['display']} operations before choosing an architecture.\n\n"
-             f"**Parameter count:** Estimate the number of trainable parameters analytically. For a linear layer with input dim `d_in` and output dim `d_out`, parameters = `d_in × d_out + d_out`. For convolutional layers: `(k × k × C_in × C_out) + C_out` per layer. For self-attention: `4 × d_model²` per head group.\n\n"
-             f"**Compute (FLOPs):** The dominant operation determines compute cost. For convolutions: `2 × k² × C_in × C_out × H_out × W_out` FLOPs per layer. For attention: `2 × N² × d_model` FLOPs where N is sequence length — this is why attention is O(N²) and Flash Attention matters.\n\n"
-             f"**Memory:** Activation memory during training = sum of all intermediate tensors (needed for backpropagation). Gradient memory ≈ parameter memory. Mixed precision (fp16/bf16) halves this. Gradient checkpointing trades compute for memory by recomputing activations during backprop.\n\n"
-             f"**Scaling laws (Chinchilla):** For transformer-family models, optimal performance scales as `L ∝ (C/N)^α` where C is compute, N is parameters. The Chinchilla result showed that model parameters and training tokens should scale together, not just model size."),
+             f"**Parameter count:** Estimate the number of trainable parameters analytically. For a linear layer with input dim `d_in` and output dim `d_out`, parameters = `d_in Ã— d_out + d_out`. For convolutional layers: `(k Ã— k Ã— C_in Ã— C_out) + C_out` per layer. For self-attention: `4 Ã— d_modelÂ²` per head group.\n\n"
+             f"**Compute (FLOPs):** The dominant operation determines compute cost. For convolutions: `2 Ã— kÂ² Ã— C_in Ã— C_out Ã— H_out Ã— W_out` FLOPs per layer. For attention: `2 Ã— NÂ² Ã— d_model` FLOPs where N is sequence length â€” this is why attention is O(NÂ²) and Flash Attention matters.\n\n"
+             f"**Memory:** Activation memory during training = sum of all intermediate tensors (needed for backpropagation). Gradient memory â‰ˆ parameter memory. Mixed precision (fp16/bf16) halves this. Gradient checkpointing trades compute for memory by recomputing activations during backprop.\n\n"
+             f"**Scaling laws (Chinchilla):** For transformer-family models, optimal performance scales as `L âˆ (C/N)^Î±` where C is compute, N is parameters. The Chinchilla result showed that model parameters and training tokens should scale together, not just model size."),
 
             ("Failure Mode Deep Dive",
              f"The primary known failure mode for **{profile['display']}** is: **{profile['risk']}**.\n\n"
              f"Advanced analysis of a failure mode requires three things:\n\n"
-             f"1. **The mechanism** — what goes wrong mathematically or algorithmically. For example, mode collapse in GANs happens when the generator finds one output that always fools the discriminator and stops exploring the rest of the distribution.\n\n"
-             f"2. **The metric signature** — what pattern in the training curves, outputs, or diagnostic stats reveals the failure. Mode collapse shows as a near-constant generator output. Vanishing gradients show as near-zero gradient norms in early layers. Overfitting shows as diverging train/val loss curves.\n\n"
-             f"3. **The intervention** — what architectural or training change addresses the root cause (not just the symptom). Blindly adding dropout or changing lr is not advanced debugging; analysing the gradient flow and loss landscape to find the structural cause is."),
+             f"1. **The mechanism** â€” what goes wrong mathematically or algorithmically. For example, mode collapse in GANs happens when the generator finds one output that always fools the discriminator and stops exploring the rest of the distribution.\n\n"
+             f"2. **The metric signature** â€” what pattern in the training curves, outputs, or diagnostic stats reveals the failure. Mode collapse shows as a near-constant generator output. Vanishing gradients show as near-zero gradient norms in early layers. Overfitting shows as diverging train/val loss curves.\n\n"
+             f"3. **The intervention** â€” what architectural or training change addresses the root cause (not just the symptom). Blindly adding dropout or changing lr is not advanced debugging; analysing the gradient flow and loss landscape to find the structural cause is."),
 
             ("Advanced Variants and Architecture Comparison",
              f"A true advanced understanding of **{topic}** requires knowing the landscape of variants and what each one changes:\n\n"
@@ -1632,7 +1845,7 @@ def read_root():
     return {"status": "DL Virtual Teacher API is running", "version": "2.1"}
 
 
-# ── Full teaching session — direct Gemini (single prompt to avoid rate limit) ─
+# â”€â”€ Full teaching session â€” direct Gemini (single prompt to avoid rate limit) â”€
 @app.post("/api/teach", response_model=TeachResponse)
 def teach_topic(request: TeachRequest):
     if not has_generation_backend():
@@ -1653,26 +1866,26 @@ def teach_topic(request: TeachRequest):
         You MUST use exactly 5 main sections. Each main section MUST have exactly 2 sub-sections.
         For EVERY SINGLE sub-section, you MUST write at least 3-4 long paragraphs (minimum 300 words per sub-section). INCREASE the length of the explanation significantly to provide maximum value! Do not be concise.
         Frame the entire response strictly for someone with zero prior deep learning knowledge.
-        
+
         CRITICAL: DO NOT use generic headings. You MUST create highly specific, dynamic, and engaging headings tailored exactly to the topic '{topic}'.
-        
+
         Example Structure Pattern (Create your own headings based on '{topic}'!):
         # 1. [Engaging Introduction to {topic}]
         ## 1.1 [What exactly is it?]
         ## 1.2 [The best real-world analogy]
-        
+
         # 2. [Why {topic} was Invented]
         ## 2.1 [The problem it solves]
         ## 2.2 [Before and After this invention]
-        
+
         # 3. [The Core Mechanics of {topic}]
         ## 3.1 [The main moving parts]
         ## 3.2 [How they connect together]
-        
+
         # 4. [A Step-by-Step Walkthrough]
         ## 4.1 [Following the data flow]
         ## 4.2 [Seeing it in action]
-        
+
         # 5. [Summary & Next Steps for {topic}]
         ## 5.1 [Simple trade-offs to remember]
         ## 5.2 [What you should learn next]
@@ -1686,45 +1899,45 @@ def teach_topic(request: TeachRequest):
         You MUST use exactly 8 main sections. Each main section MUST have exactly 3 sub-sections.
         For EVERY SINGLE sub-section, you MUST write at least 5-6 long paragraphs (minimum 600 words per sub-section). INCREASE the overall word count and technical depth significantly! Be highly verbose and expansive.
         Focus heavily on how things work under the hood, tradeoffs, and architectural decisions.
-        
+
         CRITICAL: DO NOT use generic headings. You MUST create highly specific, dynamic, and technically accurate headings tailored exactly to the topic '{topic}'.
-        
+
         Example Structure Pattern (Create your own topic-specific headings!):
         # 1. [Technical Setup of {topic}]
         ## 1.1 [Formal problem definition]
         ## 1.2 [Architectural goals]
         ## 1.3 [Mathematical intuition]
-        
+
         # 2. [Architecture Breakdown for {topic}]
         ## 2.1 [Deep dive into early layers]
         ## 2.2 [Deep dive into core mechanics]
         ## 2.3 [Information flow and connectivity]
-        
+
         # 3. [Forward Pass Dynamics]
         ## 3.1 [Data input and tensor shapes]
         ## 3.2 [Intermediate transformations]
         ## 3.3 [Final output representations]
-        
+
         # 4. [{topic}-Specific Loss Functions]
         ## 4.1 [Standard objective choices]
         ## 4.2 [Why this formulation works]
         ## 4.3 [Custom loss variations]
-        
+
         # 5. [Training & Optimization Strategy]
         ## 5.1 [Optimizer selection]
         ## 5.2 [Batching and epoch walkthrough]
         ## 5.3 [Convergence behavior]
-        
+
         # 6. [Crucial Hyperparameters for {topic}]
         ## 6.1 [Learning rate and schedulers]
         ## 6.2 [Key architectural knobs]
         ## 6.3 [Regularization strategies]
-        
+
         # 7. [Implementation & Debugging Gotchas]
         ## 7.1 [Common shape and type bugs]
         ## 7.2 [Memory footprint management]
         ## 7.3 [Isolating model failures]
-        
+
         # 8. [Practitioner's Guide to {topic}]
         ## 8.1 [Deployment strategies]
         ## 8.2 [Inference speedups]
@@ -1738,76 +1951,76 @@ def teach_topic(request: TeachRequest):
         You MUST use exactly 12 main sections. Each main section MUST have exactly 4 sub-sections.
         For EVERY SINGLE sub-section, you MUST write at least 8 to 10 giant paragraphs (minimum 1000 words per sub-section). INCREASE the length and depth to the absolute maximum! Write a massive wall of text for every section.
         You MUST elaborate on every mathematical proof, every hardware optimization, and every tensor shape in excruciating detail. Leave absolutely no stone unturned.
-        
+
         CRITICAL: DO NOT use generic headings. You MUST create highly specific, dynamic, and advanced research-level headings tailored exactly to the topic '{topic}'.
-        
+
         Example Structure Pattern (Create your own deeply technical headings!):
         # 1. [Formal Mathematical Formulation of {topic}]
         ## 1.1 [Objective Function Derivation (LaTeX)]
         ## 1.2 [Probabilistic interpretation]
         ## 1.3 [Assumptions and priors]
         ## 1.4 [Theoretical bounds]
-        
+
         # 2. [Rigorous Architecture Analysis of {topic}]
         ## 2.1 [Exact tensor shapes (N, C, H, W)]
         ## 2.2 [Parameter count derivation]
         ## 2.3 [Activation functions analysis]
         ## 2.4 [Receptive fields / Attention span]
-        
+
         # 3. [Advanced Forward Pass Mechanics]
         ## 3.1 [Feature extraction depth]
         ## 3.2 [Information bottleneck]
         ## 3.3 [Latent space topology]
         ## 3.4 [Jacobian of the forward pass]
-        
+
         # 4. [Backward Pass & Gradient Dynamics in {topic}]
         ## 4.1 [Gradient derivation (LaTeX)]
         ## 4.2 [Chain rule expansion]
         ## 4.3 [Exploding/Vanishing analysis]
         ## 4.4 [Gradient clipping thresholds]
-        
+
         # 5. [Loss Landscape & Optimization]
         ## 5.1 [Hessian matrix insights]
         ## 5.2 [Convergence proofs]
         ## 5.3 [Training stability analysis]
         ## 5.4 [Saddle points and local minima]
-        
+
         # 6. [Computational Complexity of {topic}]
         ## 6.1 [Time complexity (Big-O)]
         ## 6.2 [Space complexity (VRAM)]
         ## 6.3 [Scaling laws (Compute vs Data)]
         ## 6.4 [Parallelization strategies]
-        
+
         # 7. [SOTA {topic} Variants and Evolutions]
         ## 7.1 [Key foundational papers]
         ## 7.2 [Modern breakthroughs (2024+)]
         ## 7.3 [Architectural tweaks]
         ## 7.4 [Empirical performance comparisons]
-        
+
         # 8. [Edge Cases & Failure Modes]
         ## 8.1 [Catastrophic forgetting]
         ## 8.2 [Out-of-distribution handling]
         ## 8.3 [Adversarial vulnerabilities]
         ## 8.4 [Bias, fairness, and safety]
-        
+
         # 9. [Hardware Acceleration for {topic}]
         ## 9.1 [CUDA-level optimizations]
         ## 9.2 [TensorRT and quantization techniques]
         ## 9.3 [Memory tricks and Flash Attention]
         ## 9.4 [Multi-GPU scaling (DDP/FSDP)]
-        
+
         # 10. [Open Problems & Future Research in {topic}]
         ## 10.1 [Unsolved theoretical challenges]
         ## 10.2 [Next-generation architectural shifts]
         ## 10.3 [Current theoretical gaps]
         ## 10.4 [The 5-year outlook for the field]
-        
+
         # 11. [Hardcore Interview Assessment on {topic}]
         ## 11.1 [FAANG-level Coding question]
         ## 11.2 [Deep Research conceptual question]
         ## 11.3 [Production System Design question]
         ## 11.4 [Debugging an active distributed training run]
-        
+
         # 12. [Final Conclusions on {topic}]
         ## 12.1 [Comprehensive technical summary]
         ## 12.2 [Key takeaways for researchers]
@@ -1816,7 +2029,7 @@ def teach_topic(request: TeachRequest):
         """
 
         prompt = f"""You are a verbose, highly detailed AI professor at a Deep Learning University. Generate a MASTERCLASS level educational experience for '{topic}' at a {diff} level.
-        
+
         CRITICAL INSTRUCTIONS:
         - EVERYTHING must be unique to '{topic}'. Never use generic templates.
         - CONTENT DEPTH: Provide extremely detailed, long-form content. You MUST write massive walls of text.
@@ -1859,7 +2072,7 @@ def teach_topic(request: TeachRequest):
         import re as _re
         import json
 
-        # ── Robust delimiter parsing ──────────────────────────────────────────
+        # â”€â”€ Robust delimiter parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Match delimiters even if the model wraps them in markdown decoration
         # (e.g. "**===PLAN===**" or "# ===PLAN===").  We look for the keyword
         # anywhere on a line that contains ONLY that keyword (plus whitespace /
@@ -1906,7 +2119,7 @@ def teach_topic(request: TeachRequest):
             "quiz": sections["quiz"].strip()
         }
 
-        # Final safety check — fall back to rich offline mock for any missing section
+        # Final safety check â€” fall back to rich offline mock for any missing section
         mock = get_mock_curriculum(topic, diff)
         for k in ["plan", "content", "code", "quiz"]:
             if not results.get(k):
@@ -1932,7 +2145,7 @@ def teach_topic(request: TeachRequest):
         raise HTTPException(status_code=500, detail=err)
 
 
-# ── Fast Notes generation ──────────────────────────────────────────────────
+# â”€â”€ Fast Notes generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/notes", response_model=NotesResponse)
 def generate_notes(request: NotesRequest):
     topic = request.topic or "the provided text"
@@ -1954,7 +2167,7 @@ def generate_notes(request: NotesRequest):
     return NotesResponse(topic=topic, type=request.type, notes=notes)
 
 
-# ── Fast Quiz generation ───────────────────────────────────────────────────
+# â”€â”€ Fast Quiz generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/quiz", response_model=QuizResponse)
 def generate_quiz(request: QuizRequest):
     prompt = f"""Generate {request.count} {request.quiz_type} quiz questions about '{request.topic}' at {request.difficulty} level.
@@ -1993,7 +2206,7 @@ Make every question specific to '{request.topic}'. Ensure the questions are fres
 async def extract_text(file: UploadFile = File(...)):
     content = await file.read()
     mime_type = file.content_type
-    
+
     try:
         # 1. AI Extraction (Gemini)
         gemini_client = get_gemini_client()
@@ -2078,7 +2291,7 @@ async def extract_text(file: UploadFile = File(...)):
         print(f"Extraction crash: {e}")
         return {"text": "", "error": str(e)}
 
-# ── Fast Chat ──────────────────────────────────────────────────────────────
+# â”€â”€ Fast Chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     history_str = ""
@@ -2099,7 +2312,7 @@ Assistant:"""
         reply = offline_chat_reply(request.message)
     return ChatResponse(reply=reply)
 
-# ── Dynamic Visualization Generation ─────────────────────────────────────────
+# â”€â”€ Dynamic Visualization Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/generate_viz", response_model=VizGenResponse)
 def generate_viz(request: VizGenRequest):
     topic = request.topic.strip()
@@ -2111,7 +2324,7 @@ Requirements:
 3. Include brief explanatory text inside the UI.
 4. Ensure the output is ONLY valid HTML code. Do NOT wrap in markdown backticks (like ```html), just output the raw HTML string starting with <div or <style or <!DOCTYPE html>.
 Make it highly educational and visually impressive!"""
-    
+
     try:
         raw = fast_generate(prompt)
         # Strip markdown code block if present
@@ -2122,7 +2335,7 @@ Make it highly educational and visually impressive!"""
             raw = raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
-        
+
         return VizGenResponse(topic=topic, html_code=raw.strip())
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -2153,13 +2366,13 @@ Make it highly educational and visually impressive!"""
         """
         return VizGenResponse(topic=topic, html_code=fallback_html)
 
-# ── Intelligent Fallback & Semantic Graph Generator ──────────────────────────
+# â”€â”€ Intelligent Fallback & Semantic Graph Generator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/analyze_topic", response_model=AnalyzeTopicResponse)
 def analyze_topic(request: AnalyzeTopicRequest):
     topic = request.topic.strip()
     if not has_generation_backend():
         return AnalyzeTopicResponse(type="custom_graph", data=build_visualization_graph(topic))
-    
+
     prompt = f"""You are an expert AI architecture visualizer. The user searched for the deep learning concept: '{topic}'.
 
 First, check if it matches an existing predefined UI component:
@@ -2205,7 +2418,7 @@ Rules:
         if raw.startswith("```json"): raw = raw[7:]
         elif raw.startswith("```"): raw = raw[3:]
         if raw.endswith("```"): raw = raw[:-3]
-        
+
         parsed = json.loads(raw.strip())
         return AnalyzeTopicResponse(**parsed)
     except Exception as e:
@@ -2273,7 +2486,7 @@ Rules:
                 {"id": "n3", "label": "Predictions", "x": 90, "y": 50, "color": "#ec4899"}
             ]
             edges = [{"source": "n1", "target": "n2", "label": "Weights"}, {"source": "n2", "target": "n3", "label": "Activation"}]
-            
+
         return AnalyzeTopicResponse(type="custom_graph", data=build_visualization_graph(topic))
 
 
